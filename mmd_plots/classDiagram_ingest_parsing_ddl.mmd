@@ -1,0 +1,74 @@
+%%{init: { "theme": "neutral", "fontSize": 9, "themeVariables": { "classDiagramPadding": 6, "nodeSpacing": 22, "rankSpacing": 28 }}}%%
+classDiagram
+
+class manage_py {
+  +migrate()
+  +ingest(--reset, --data-dir)
+  +seed(--config)
+  +compose-up(--build)
+  +compose-down()
+}
+
+class migrunner {
+  +run()
+}
+
+class TableIngestor {
+  +ingest(table,csv_path,json_col,conflict_cols,commit) int
+  +ingest_many(table,csv_paths,json_col,conflict_cols,commit) int
+}
+
+class CsvParseStrategy {
+  +build_rows(csv_path,json_col,analysis) list~dict~
+}
+
+class MultiHeaderEntriesStrategy {
+  +build_rows(csv_path,json_col,analysis) list~dict~
+}
+
+class Upserter {
+  +upsert(conn,table,rows,conflict_cols,update_cols,json_cols,commit) int
+}
+
+class DefaultUpserter {
+  -conn_provider: ConnectionProvider
+  +upsert(conn,table,rows,conflict_cols,update_cols,json_cols,commit) int
+}
+
+class ConnectionProvider { +get_connection() }
+class PsycopgEnvConnectionProvider { +get_connection() }
+
+class db_utils {
+  +ensure_table(conn,ddl)
+  +upsert_rows(conn,table,rows,conflict_cols,update_cols,json_cols,commit) int
+}
+
+class parsing_normalize {
+  +normalize_analysis()
+  +normalize_type_label()
+  +check_fraction_consistency()
+  +extract_base_fraction_notes()
+}
+
+class parsing_csv_multiheader {
+  +collect_data_keys_from_csv()
+  +rows_from_multiheader_csv_grouped()
+}
+
+class ddl_tables { +make_family_table_ddl() }
+class ddl_views  { +make_entries_view_ddl(); +make_presence_view_ddl(); +make_presence_view_with_links() }
+
+manage_py --> migrunner : calls migrate
+manage_py --> TableIngestor : calls ingest/ingest_many
+TableIngestor --> CsvParseStrategy : uses
+TableIngestor --> Upserter : uses
+DefaultUpserter --> ConnectionProvider : depends
+PsycopgEnvConnectionProvider ..|> ConnectionProvider
+MultiHeaderEntriesStrategy ..|> CsvParseStrategy
+DefaultUpserter ..|> Upserter
+
+db_utils --> parsing_normalize
+db_utils --> parsing_csv_multiheader
+parsing_csv_multiheader --> parsing_normalize
+
+%% note for TableIngestor "CORE: CSV → normalize → JSON entries → UPSERT"

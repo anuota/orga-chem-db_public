@@ -1,0 +1,74 @@
+%%{init: {
+  "theme": "neutral",
+  "fontSize": 9,
+  "themeVariables": { "classDiagramPadding": 6, "nodeSpacing": 22, "rankSpacing": 28 }
+}}%%
+classDiagram
+
+%% ===== Database node =====
+class Database
+class web_static { index.html }
+
+
+%% ===== ACL / RLS / Projects =====
+class db_users {
+  +ensure_identity_schema(conn, commit)
+  +ensure_rls_for_table(conn, table)
+  +ensure_rls_for_tables(conn, tables)
+  +ensure_subject_user(conn, user_id)
+  +ensure_subject_group(conn, group_id)
+  +add_user_to_group(conn, user_id, group_id)
+  +grant_sample_access(conn, samplenumber, subject_id, as_group, can_read, can_write)
+  +revoke_sample_access(conn, samplenumber, subject_id)
+  +ensure_project(conn, project_id, title)
+  +link_samples_to_project(conn, project_id, tables) int
+  +grant_project_access(conn, project_id, subject_id, as_group, can_read, can_write)
+}
+class manage_py {
+  +serve()
+  +compose-up()
+  +compose-down()
+  +seed()
+}
+
+%% ===== FastAPI =====
+class api_main {
+  +get_healthz()
+  +get_dbz()
+  +get_config_tables()
+  +get_search_samples(q, limit)
+  +get_sample(samplenumber)
+  +get_sample_presence(samplenumber)
+  +get_entries(table, samplenumber)
+  +get_filter_samples(table, measured_by, type, fraction, limit)
+}
+
+%% ===== Migrations & Seeding =====
+class migrunner {
+  +run() int
+  +_apply_one(conn, path)
+  +_applied(cur, filename) bool
+  +_mark(cur, filename)
+}
+
+class acl_seed {
+  +main(argv) int
+}
+
+%% ===== Relationships =====
+manage_py --> api_main : serve (uvicorn)
+api_main --> Database : queries (RLS via SET LOCAL "app.user")
+db_users --> Database : schema & RLS
+manage_py --> docker_compose : up/down
+api_main --> web_static : static /
+
+%% ===== Relationships =====
+%% api_main --> Database : queries (RLS via SET LOCAL app.user)
+%% db_users --> Database : creates schema+policies
+%% migrunner --> Database : applies SQL migrations
+%% acl_seed --> Database : seeds users/groups/projects/ACL
+%% api_main --> web_static : serves /
+
+%% Layer notes
+note for api_main "HTTP API (FastAPI). Sets RLS user via SET LOCAL app.user and queries views."
+note for db_users "RLS/ACL schema & policies; manages users, groups, projects and grants."

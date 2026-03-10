@@ -1,0 +1,70 @@
+classDiagram
+    direction LR
+
+    class App {
+      +main()
+      +FAMILIES
+    }
+
+    class ConnectionProvider {
+      <<interface>>
+      +get_connection()
+    }
+
+    class Upserter {
+      <<interface>>
+      +upsert()
+    }
+
+    class CsvParseStrategy {
+      <<interface>>
+      +build_rows()
+    }
+
+    class PsycopgEnvConnectionProvider {
+      +get_connection()
+    }
+
+    class DefaultUpserter {
+      +upsert()
+    }
+
+    class MultiHeaderEntriesStrategy {
+      +build_rows()
+    }
+
+    class TableIngestor {
+      -upserter : Upserter
+      -parser   : CsvParseStrategy
+      +ingest()
+    }
+
+    class db_utils_mod {
+      +load_env()
+      +get_connection()
+      +set_connection_provider()
+      +ensure_table()
+      +make_family_table_ddl()
+      +make_presence_view_ddl()
+      +make_presence_view_with_links()
+      +make_entries_view_ddl()
+      +rows_from_multiheader_csv_grouped()
+      +extract_base_fraction_notes()
+      +_dedupe_rows()
+      +upsert_rows()
+      +_clean_cell()
+      +_parse_date_like()
+      +normalize_sample_number()
+    }
+
+    App --> TableIngestor : uses
+    App ..> db_utils_mod : calls
+    TableIngestor --> Upserter : depends on
+    TableIngestor --> CsvParseStrategy : depends on
+    TableIngestor ..> db_utils_mod : calls
+    DefaultUpserter ..> db_utils_mod : calls upsert_rows
+    MultiHeaderEntriesStrategy ..> db_utils_mod : calls rows_from_multiheader_csv_grouped
+
+    ConnectionProvider <|.. PsycopgEnvConnectionProvider
+    Upserter <|.. DefaultUpserter
+    CsvParseStrategy <|.. MultiHeaderEntriesStrategy

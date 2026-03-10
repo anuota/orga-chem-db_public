@@ -1,0 +1,83 @@
+%%{init: {
+  "theme": "neutral",
+  "fontSize": 100,
+  "themeVariables": 
+  { "classDiagramPadding": 100, 
+    "nodeSpacing": 1, 
+    "rankSpacing": 1 }
+}}%%
+flowchart TB
+
+%% -------- DevOps / Orchestration --------
+subgraph DevOps
+  MAN["manage.py / Typer CLI"]
+  DC["docker compose"]
+  MIGIMG["migrate image"]
+  APPIMG["app image"]
+end
+
+
+%% -------- Runtime (Compose stack) --------
+subgraph Runtime
+  APP["FastAPI app (api/main.py)"]
+  MIG["migrunner.py (migrations/*.sql)"]
+  DB["PostgreSQL"]
+  WEB["web static files"]
+end
+
+
+%% -------- Ingestion pipeline --------
+subgraph Ingestion
+  CDMT["create_db_milti_table.py"]
+  ING["TableIngestor (services/ingest.py)"]
+  PAR["CSV parser (parsing/csv_multiheader.py)"]
+  NORM["Normalization (parsing/normalize.py)"]
+  UPS["Upsert (infra/upsert.py)"]
+  DDLT["Tables DDL (ddl/tables.py)"]
+  DDLV["Views DDL (ddl/views.py)"]
+end
+
+
+%% -------- Identity / ACL / RLS --------
+subgraph ACL_RLS
+  ACLMOD["db_users.py"]
+  ACLSEED["acl_seed.py (TOML)"]
+end
+
+
+%% -------- Wiring (no edge labels, simple arrows) --------
+MAN --> DC
+MAN --> MIG
+MAN --> CDMT
+MAN --> ACLSEED
+
+DC --> APP
+DC --> MIG
+DC --> DB
+
+MIG --> DB
+
+APP --> DB
+APP --> WEB
+
+CDMT --> DB
+CDMT --> ING
+ING --> PAR
+PAR --> NORM
+NORM --> UPS
+UPS --> DB
+CDMT --> DDLT
+CDMT --> DDLV
+
+ACLSEED --> ACLMOD
+ACLMOD --> DB
+
+%% NOTE_MAN["Tools to build, run, and manage the stack (CLI, Docker, images)."]:::note
+%% MAN -.-> NOTE_MAN
+%% NOTE_APP["The running system: FastAPI app, database, migrations, web UI."]:::note
+%% APP -.-> NOTE_APP
+%% NOTE_PAR["Scripts that read CSVs, normalize, and insert data into the DB."]:::note
+%% PAR -.-> NOTE_PAR
+%% NOTE_ACL["Manages user/group access and permissions (RLS & ACL setup)."]:::note
+%% ACLMOD -.-> NOTE_ACL
+classDef note fill:#FFF5B1,stroke:#B38F00,color:#333,stroke-width:1px;

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OrgChem – Sample Viewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    .row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+    input, select, button { padding: .5rem .7rem; font-size: 1rem; }
+    pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow: auto; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.5rem; }
+    @media (max-width: 960px){ .grid{ grid-template-columns: 1fr; } }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; }
+    .muted { color: #6b7280; }
+    h2 { margin:.2rem 0 .6rem 0; font-size: 1.1rem; }
+    .pill { display:inline-block; background:#eef2ff; color:#3730a3; padding:.15rem .5rem; border-radius:999px; font-size:.85rem; }
+  </style>
+</head>
+<body>
+  <h1>OrgChem – Sample Viewer</h1>
+  <div class="row">
+    <label for="sn">Sample:</label>
+    <input id="sn" placeholder="e.g. G003209" />
+    <button id="btnLoad">Load</button>
+    <span class="muted" id="status"></span>
+  </div>
+
+  <div class="row" style="margin-top:1rem;">
+    <label for="table">Entries table:</label>
+    <select id="table"></select>
+    <button id="btnEntries">Fetch entries</button>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Presence</h2>
+      <pre id="presence">(no data)</pre>
+    </div>
+    <div class="card">
+      <h2>Entries (<span class="pill" id="which">–</span>)</h2>
+      <pre id="entries">(no data)</pre>
+    </div>
+    <div class="card" style="grid-column:1 / -1;">
+      <h2>Sample aggregate</h2>
+      <pre id="sample">(no data)</pre>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const status = el('status');
+    const sn = el('sn');
+    const tableSel = el('table');
+    const btnLoad = el('btnLoad');
+    const btnEntries = el('btnEntries');
+    const presence = el('presence');
+    const entries = el('entries');
+    const which = el('which');
+    const sample = el('sample');
+
+    async function loadTables(){
+      try{
+        const r = await fetch('/config/tables');
+        const data = await r.json();
+        tableSel.innerHTML = data.map(t => `<option value="${t}">${t}</option>`).join('');
+      }catch(e){ console.error(e); }
+    }
+
+    async function loadSample(){
+      const id = sn.value.trim();
+      if(!id){ status.textContent = 'Enter a sample number'; return; }
+      status.textContent = 'Loading…';
+      try{
+        const r = await fetch(`/samples/${encodeURIComponent(id)}`);
+        if(!r.ok){
+          presence.textContent = '(not found)';
+          sample.textContent = await r.text();
+          status.textContent = 'Not found';
+          return;
+        }
+        const data = await r.json();
+        sample.textContent = JSON.stringify(data, null, 2);
+        const { presence: p } = data;
+        presence.textContent = JSON.stringify(p, null, 2);
+        status.textContent = 'Loaded';
+      }catch(e){
+        console.error(e);
+        status.textContent = 'Error';
+      }
+    }
+
+    async function loadEntries(){
+      const id = sn.value.trim();
+      const tbl = tableSel.value;
+      if(!id || !tbl){ status.textContent = 'Enter sample & table'; return; }
+      status.textContent = 'Loading entries…';
+      which.textContent = tbl;
+      try{
+        const r = await fetch(`/entries/${encodeURIComponent(tbl)}?samplenumber=${encodeURIComponent(id)}`);
+        const data = await r.json();
+        entries.textContent = JSON.stringify(data, null, 2);
+        status.textContent = 'Loaded';
+      }catch(e){ console.error(e); status.textContent = 'Error'; }
+    }
+
+    btnLoad.addEventListener('click', loadSample);
+    btnEntries.addEventListener('click', loadEntries);
+    sn.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ loadSample(); }});
+    loadTables();
+  </script>
+</body>
+</html>
+

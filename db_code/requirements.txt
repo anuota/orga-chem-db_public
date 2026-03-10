@@ -1,0 +1,4 @@
+pandas==2.2.3
+psycopg2-binary==2.9.11
+python-dotenv==1.1.1
+rapidfuzz==3.14.3

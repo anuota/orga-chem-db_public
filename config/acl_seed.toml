@@ -1,0 +1,23 @@
+[users]
+items = ["anya", "developer"]
+
+[groups]
+items = ["open", "geochem", "admins"]
+
+[memberships]
+open    = ["anya", "developer"]
+# geochem = ["..."]
+
+[projects]
+open = "Open data"
+
+[project_acl.open]
+
+open = { read = true, write = false }
+
+
+# [sample_projects]
+# G003200 = ["open"]
+
+# [sample_acl.G003200]
+# anya = { read = true, write = false }

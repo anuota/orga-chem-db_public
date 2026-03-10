@@ -1,0 +1,168 @@
+stages: [lint, unit, migrate, build, deploy]
+
+# Common templates
+.python_job: &python_job
+  image: python:3.13-slim
+  before_script:
+    - python -V
+    - python -m pip install --upgrade pip
+
+.branch_mr_rules: &branch_mr_rules
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+cache:
+  paths:
+    - .cache/pip
+
+lint:
+  stage: lint
+  <<: *python_job
+  script:
+    - pip install -r db_code/requirements.txt -r api/requirements.txt
+    - |
+      PY_FILES="$(git ls-files '*.py' 2>/dev/null || true)"
+      if [ -z "$PY_FILES" ]; then
+        PY_FILES="$(find . -type f -name '*.py' -print)"
+      fi
+      if [ -n "$PY_FILES" ]; then
+        echo "Compiling Python files:"
+        echo "$PY_FILES"
+        python -m py_compile $PY_FILES
+      else
+        echo "No Python files found to compile."
+      fi
+  <<: *branch_mr_rules
+
+unit:
+  stage: unit
+  <<: *python_job
+  script:
+    - pip install -r db_code/requirements.txt -r api/requirements.txt -r tests/requirements.txt
+    - PYTHONPATH=. python -m pytest tests/ -v
+  <<: *branch_mr_rules
+
+migrate:
+  stage: migrate
+  <<: *python_job
+  services:
+    - name: postgres:16
+      alias: db
+  variables:
+    POSTGRES_DB: orgchem_ci
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_HOST_AUTH_METHOD: trust
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: orgchem_ci
+    PGUSER: postgres
+    PGPASSWORD: postgres
+  script:
+    - echo "PGHOST=$PGHOST PGPORT=$PGPORT PGDATABASE=$PGDATABASE PGUSER=$PGUSER"
+    - apt-get update && apt-get install -y --no-install-recommends postgresql-client
+    - psql --version
+    - pip install psycopg2-binary==2.9.11
+    - |
+      echo "Waiting for Postgres at $PGHOST:$PGPORT ..."
+      start_ts=$(date +%s)
+      # Try for up to 180 seconds
+      until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE"; do
+        now=$(date +%s)
+        if [ $(( now - start_ts )) -ge 180 ]; then
+          echo "ERROR: Postgres did not become ready within 180s"
+          exit 1
+        fi
+        echo -n "."
+        sleep 2
+      done
+      echo "Postgres is up."
+    - python migrunner.py
+    - psql -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -c "\dt public.*"
+  <<: *branch_mr_rules
+
+docker-build:
+  stage: build
+  image: docker:27
+  services:
+    - name: docker:27-dind
+  variables:
+    DOCKER_DRIVER: overlay2
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "/certs/client"
+    DOCKER_BUILDKIT: "1"
+  before_script:
+    - |
+      echo "Waiting for Docker daemon (up to 120s)..."
+      i=0
+      while ! docker info >/dev/null 2>&1; do
+        i=$((i + 2))
+        if [ "$i" -ge 120 ]; then
+          echo "ERROR: Docker daemon did not start within 120s"
+          exit 1
+        fi
+        sleep 2
+      done
+      echo "Docker daemon is ready."
+  script:
+    - docker version
+    - docker build -f docker/migrate.Dockerfile -t "$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f docker/ingest.Dockerfile -t "$CI_REGISTRY_IMAGE/ingest:$CI_COMMIT_SHORT_SHA" .
+    - docker build -f docker/app/Dockerfile -t "$CI_REGISTRY_IMAGE/app:$CI_COMMIT_SHORT_SHA" .
+    - |
+      if [ -n "$CI_REGISTRY" ] && [ -n "$CI_REGISTRY_USER" ] && [ -n "$CI_REGISTRY_PASSWORD" ]; then
+        echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+        docker push "$CI_REGISTRY_IMAGE/migrate:$CI_COMMIT_SHORT_SHA"
+        docker push "$CI_REGISTRY_IMAGE/ingest:$CI_COMMIT_SHORT_SHA"
+        docker push "$CI_REGISTRY_IMAGE/app:$CI_COMMIT_SHORT_SHA"
+      else
+        echo "Registry credentials are missing; skipping docker push."
+      fi
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+      allow_failure: true
+
+deploy_gfz:
+  stage: deploy
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache openssh-client bash
+    - test -n "$GFZ_DEPLOY_HOST"
+    - test -n "$GFZ_DEPLOY_USER"
+    - test -n "$GFZ_DEPLOY_PATH"
+    - test -n "$GFZ_DEPLOY_SSH_KEY"
+    - eval "$(ssh-agent -s)"
+    - ssh-add "$GFZ_DEPLOY_SSH_KEY"
+    - ssh-add -l
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -H "$GFZ_DEPLOY_HOST" >> ~/.ssh/known_hosts
+  script:
+    - |
+      ssh "$GFZ_DEPLOY_USER@$GFZ_DEPLOY_HOST" "set -euo pipefail;
+      cd '$GFZ_DEPLOY_PATH';
+      git fetch --all;
+      git checkout '$CI_COMMIT_SHA';
+      docker compose --env-file .env.server -f compose/docker-compose.prod.yml pull || true;
+      docker compose --env-file .env.server -f compose/docker-compose.prod.yml up -d --build;
+      docker compose --env-file .env.server -f compose/docker-compose.prod.yml ps;
+      if command -v curl >/dev/null 2>&1; then
+        curl -fsS http://localhost:8000/healthz >/dev/null;
+      else
+        wget -qO- http://localhost:8000/healthz >/dev/null;
+      fi"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: false

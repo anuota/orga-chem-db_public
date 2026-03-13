@@ -28,7 +28,7 @@ jobs:
       - name: Unit tests (no docker)
         env:
           # В юнит-тестах БД не нужна; если нужны — добавим отдельный job
-          ORG_CHEM_DATA_DIR: ./tests/fixtures  # если появятся мини-фикстуры
+          ORG_CHEM_FT_ROOT: ./tests/fixtures  # если появятся мини-фикстуры
         run: |
           pytest -q || true  # временно не валим билд, пока тесты не допишем
 

@@ -70,11 +70,21 @@ _CANON_EXTRA = {
     "phenenthrenes": "phenanthrenes",
     "archaelipids": "archaeolipids",
     "fatty acids": "fatty_acids",
-    "n-alkanes": "n_alkanes_isoprenoids",
-    "alkanes": "n_alkanes_isoprenoids",
-    "n_alkanes_isoprenoids": "n_alkanes_isoprenoids",
-    "n-alkanes,isoprenoids": "n_alkanes_isoprenoids",
+    "fattyacids": "fatty_acids",
+    "aromaticsteroids": "aromatic_steroids",
+    "n-alkanes": "alkanes",
+    "n_alkanes": "alkanes",
+    "alkanes": "alkanes",
+    "n_alkanes_isoprenoids": "alkanes",
+    "n-alkanes,isoprenoids": "alkanes",
 }
+
+# Regex for stripping GC instrument prefixes from filenames
+_INSTRUMENT_RE = re.compile(r"^(?:gcfid|gcmrmms|gcms)[_\s-]+", re.IGNORECASE)
+# Regex for stripping chromatographic section/fraction prefixes
+_SECTION_RE = re.compile(
+    r"^(?:aliphatic|aromatic|nso(?:silyl)?)[_\s-]+", re.IGNORECASE
+)
 
 
 def _basic_normalize(name: str) -> str:
@@ -84,6 +94,45 @@ def _basic_normalize(name: str) -> str:
     s = re.sub(r"(_?combined|_?concentration)$", "", s)  # drop suffixes
     s = s.strip("_")
     return s
+
+
+def derive_table_from_filename(path: str) -> str:
+    """Derive a canonical table name from a CSV filename.
+
+    Handles both old-style names (``Hopanes_combined (Area).csv``) and
+    new GC-prefixed names (``GCMS-aromatic_naphthalenes_combined (Area).csv``).
+
+    Steps:
+      1. Strip extension and ``_combined`` marker.
+      2. Strip trailing data-type marker ``(Area)`` / ``(Concentration)``.
+      3. Strip GC instrument prefix (GCFID-, GCMRMMS-, GCMS-).
+      4. Strip section/fraction prefix (aliphatic_, aromatic_, nso_, nsosilyl_).
+      5. Normalise via :func:`normalize_analysis`.
+    """
+    import os
+
+    name = os.path.basename(path)
+    stem = name.rsplit(".", 1)[0]
+    # Drop _combined marker
+    base = stem.split("_combined", 1)[0]
+    # Drop trailing (Area) / (Concentration) if _combined was absent
+    base = re.sub(r"\s*\((?:Area|Concentration|concentration)\)\s*$", "", base)
+    # Strip instrument prefix  e.g. "GCFID-" / "GCMS-" / "GCMRMMS-"
+    base = _INSTRUMENT_RE.sub("", base)
+    # Strip section prefix     e.g. "aliphatic_" / "aromatic_" / "NSO_"
+    base = _SECTION_RE.sub("", base)
+    # Standard char cleanup
+    base = (
+        base.replace("(", " ")
+        .replace(")", " ")
+        .replace("-", " ")
+        .replace("N-", "")
+        .replace("n-", "")
+        .strip()
+        .lower()
+        .replace(" ", "_")
+    )
+    return normalize_analysis(base)
 
 
 def _fuzzy_best_match(

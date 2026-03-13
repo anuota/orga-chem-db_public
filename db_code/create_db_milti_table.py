@@ -14,7 +14,7 @@ from db_code.ddl.tables import make_family_table_ddl
 from db_code.ddl.views import (make_entries_view_ddl, make_presence_view_ddl,
                                make_presence_view_with_links)
 from db_code.parsing.csv_multiheader import collect_data_keys_from_csv
-from db_code.parsing.normalize import normalize_analysis
+from db_code.parsing.normalize import normalize_analysis, derive_table_from_filename
 from db_code.services.ingest import TableIngestor
 
 from db_code.ref.ref_n_alkanes import ensure_ref_tables as ensure_ref_n_alkanes, seed_from_csvs
@@ -64,9 +64,15 @@ RESET = (
 )
 
 # --- 1) Family registry (single source of truth) ---
-# Prefer env var; fall back to a local absolute path you use in dev
+# GC compound data lives under the shared data root (FT-DataForDatabase).
+# ORG_CHEM_DATA_DIR overrides if set (backward compat / CI).
+_FT_ROOT = os.environ.get(
+    "ORG_CHEM_FT_ROOT",
+    "/Users/anya/Coding/Database/FT-DataForDatabase",
+)
 DATA_DIR = os.environ.get(
-    "ORG_CHEM_DATA_DIR", "/Users/anya/Coding/Database/data_insert_trial/"
+    "ORG_CHEM_DATA_DIR",
+    os.path.join(_FT_ROOT, "GC-DataForDatabase"),
 )
 
 # Keep these families available in schema/view layer even when ingesting only GC files.
@@ -77,28 +83,13 @@ REQUIRED_EMPTY_FAMILIES = [
 ]
 
 
-def _derive_table_from_filename(path: str) -> str:
-    name = os.path.basename(path)
-    stem = name.rsplit(".", 1)[0]
-    base = stem.split("_combined", 1)[0]
-    base = (
-        base.replace("(", " ")
-        .replace(")", " ")
-        .replace("-", " ")
-        .replace("N-", "")
-        .replace("n-", "")
-        .strip()
-        .lower()
-        .replace(" ", "_")
-    )
-    # canonicalize (handles variants like Flourenes→fluorenes)
-    return normalize_analysis(base)
-
-
 def discover_families(data_dir: str) -> list[dict]:
     patterns = [
         os.path.join(data_dir, "*combined (Area).csv"),
         os.path.join(data_dir, "*combined.csv"),
+        os.path.join(data_dir, "* (Area).csv"),
+        os.path.join(data_dir, "* (Concentration).csv"),
+        os.path.join(data_dir, "* (concentration).csv"),
     ]
     files: list[str] = []
     for p in patterns:
@@ -106,7 +97,7 @@ def discover_families(data_dir: str) -> list[dict]:
 
     groups: dict[str, dict] = {}
     for csv_path in sorted(set(files)):
-        table = _derive_table_from_filename(csv_path)
+        table = derive_table_from_filename(csv_path)
         if not table:
             continue
         g = groups.setdefault(table, {"table": table, "json_col": table, "csvs": []})

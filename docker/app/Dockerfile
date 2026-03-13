@@ -27,6 +27,7 @@ COPY --from=builder /root/.local /root/.local
 COPY api/ /app/api/
 COPY web/ /app/web/
 COPY db_code/ /app/db_code/
+COPY app/data/ /app/app/data/
 
 # Uvicorn entrypoint
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

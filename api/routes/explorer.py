@@ -14,6 +14,7 @@ from api.shared import (
     ALLOWED_TABLES,
     MATRIX_META_FIELDS,
     MATRIX_META_LABELS,
+    METHOD_GROUPS,
     canonical_table_name,
     method_label,
     run_query_with_rls,
@@ -32,10 +33,9 @@ def explorer_meta(request: Request):
     - filters: distinct values for metadata fields
     - metadata_fields: list of per-entry metadata fields available for display
     """
-    user = getattr(request.state, "user", os.getenv("DEV_USER", "open"))
     methods_info: list[dict] = []
 
-    # Collect distinct filter values across all methods
+    # Collect distinct filter values across ALL methods in one query (not N+1)
     all_measured_by: set[str] = set()
     all_names: set[str] = set()
     all_types: set[str] = set()
@@ -44,48 +44,74 @@ def explorer_meta(request: Request):
     all_instruments: set[str] = set()
     all_data_types: set[str] = set()
 
-    for method in sorted(ALLOWED_TABLES):
-        view_name = f"public.{method}_entries"
+    methods_sorted = sorted(ALLOWED_TABLES)
+
+    # --- Batch 1: distinct filter values (single UNION ALL instead of 25 queries) ---
+    filter_parts = [
+        f"SELECT name, measured_by, type, date, fraction, instrument, data_type "
+        f"FROM public.{m}_entries"
+        for m in methods_sorted
+    ]
+    if filter_parts:
+        filter_sql = " UNION ALL ".join(filter_parts)
         try:
-            cols, rows = run_query_with_rls(
-                f"SELECT name, measured_by, type, date, fraction, instrument, data_type, data FROM {view_name}",
-                request,
-            )
+            _, filter_rows = run_query_with_rls(filter_sql, request)
+            for r in filter_rows:
+                mb = r.get("measured_by")
+                nm = r.get("name")
+                tp = r.get("type")
+                dt = r.get("date")
+                fr = r.get("fraction")
+                inst = r.get("instrument")
+                dtype = r.get("data_type")
+                if mb:
+                    all_measured_by.add(str(mb))
+                if nm:
+                    all_names.add(str(nm))
+                if tp:
+                    all_types.add(str(tp))
+                if dt:
+                    all_dates.add(str(dt))
+                if fr:
+                    all_fractions.add(str(fr))
+                if inst:
+                    all_instruments.add(str(inst))
+                if dtype:
+                    all_data_types.add(str(dtype))
         except Exception:
-            continue
+            pass
 
-        param_keys: set[str] = set()
-        for r in rows:
-            data = r.get("data") or {}
-            if isinstance(data, dict):
-                param_keys.update(data.keys())
-            mb = r.get("measured_by")
-            nm = r.get("name")
-            tp = r.get("type")
-            dt = r.get("date")
-            fr = r.get("fraction")
-            inst = r.get("instrument")
-            dtype = r.get("data_type")
-            if mb:
-                all_measured_by.add(str(mb))
-            if nm:
-                all_names.add(str(nm))
-            if tp:
-                all_types.add(str(tp))
-            if dt:
-                all_dates.add(str(dt))
-            if fr:
-                all_fractions.add(str(fr))
-            if inst:
-                all_instruments.add(str(inst))
-            if dtype:
-                all_data_types.add(str(dtype))
+    # --- Batch 2: parameter column keys per method (single UNION ALL) ---
+    keys_parts = [
+        f"SELECT '{m}'::text AS method, jsonb_object_keys(data) AS key "
+        f"FROM public.{m}_entries"
+        for m in methods_sorted
+    ]
+    method_keys: dict[str, set[str]] = {m: set() for m in methods_sorted}
+    if keys_parts:
+        keys_sql = (
+            "SELECT method, key FROM ("
+            + " UNION ALL ".join(keys_parts)
+            + ") _sub GROUP BY method, key ORDER BY method, key"
+        )
+        try:
+            _, keys_rows = run_query_with_rls(keys_sql, request)
+            for r in keys_rows:
+                m = r["method"]
+                if m in method_keys:
+                    method_keys[m].add(r["key"])
+        except Exception:
+            pass
 
-        methods_info.append({
-            "method": method,
-            "label": method_label(method),
-            "columns": sorted(param_keys),
-        })
+    for m in methods_sorted:
+        pk = method_keys.get(m, set())
+        # Only include methods that actually have data (keys)
+        if pk:
+            methods_info.append({
+                "method": m,
+                "label": method_label(m),
+                "columns": sorted(pk),
+            })
 
     # Collect all sample numbers from presence view
     all_samplenumbers: list[str] = []
@@ -109,8 +135,17 @@ def explorer_meta(request: Request):
     except Exception:
         pass
 
+    # Build method_groups with only methods that have data
+    methods_by_name = {m["method"]: m for m in methods_info}
+    grouped: list[dict] = []
+    for grp in METHOD_GROUPS:
+        children = [methods_by_name[m] for m in grp["methods"] if m in methods_by_name]
+        if children:
+            grouped.append({"label": grp["label"], "methods": children})
+
     return {
         "methods": methods_info,
+        "method_groups": grouped,
         "filters": {
             "samplenumbers": all_samplenumbers,
             "name": sorted(all_names),
@@ -199,16 +234,17 @@ def explorer_query(body: ExplorerQuery, request: Request):
     project_samples: set[str] | None = None
     if filt_project:
         try:
-            safe_projects = "','".join(p.replace("'", "''") for p in filt_project)
+            placeholders = ",".join(["%s"] * len(filt_project))
             _, proj_rows = run_query_with_rls(
-                f"SELECT DISTINCT samplenumber FROM public.sample_projects WHERE project_id IN ('{safe_projects}')",
+                f"SELECT DISTINCT samplenumber FROM public.sample_projects WHERE project_id IN ({placeholders})",
                 request,
+                filt_project,
             )
             project_samples = {str(r["samplenumber"]) for r in proj_rows}
         except Exception:
             project_samples = set()
 
-    # Resolve aliases in request methods (e.g. alkanes -> n_alkanes_isoprenoids)
+    # Resolve aliases in request methods (e.g. n_alkanes_isoprenoids -> alkanes)
     method_order: list[str] = []
     method_selected: dict[str, set[str] | None] = {}
     for req_method, selected_cols in body.methods.items():
@@ -481,6 +517,31 @@ def explorer_html():
         }}
         .sidebar-section-body.hidden {{ display: none; }}
 
+        /* --- Method category groups --- */
+        .method-category {{
+            margin-bottom: 0.6rem;
+        }}
+        .method-category-header {{
+            font-weight: 700;
+            font-size: 0.82rem;
+            color: #0f172a;
+            padding: 0.25rem 0.4rem;
+            background: #e2e8f0;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            user-select: none;
+        }}
+        .method-category-header:hover {{ background: #cbd5e1; }}
+        .method-category-header .cat-chevron {{
+            font-size: 0.7rem;
+            transition: transform 0.15s;
+        }}
+        .method-category-body {{ padding-left: 0.3rem; }}
+        .method-category-body.hidden {{ display: none; }}
+
         /* --- Method groups --- */
         .method-group {{
             margin-bottom: 0.4rem;
@@ -737,6 +798,9 @@ def explorer_html():
             <a href="/web/matrix">Methods index</a>
             <a href="/web/labdata">Lab data page</a>
             <a href="/web/samples/filter">Sample filters</a>
+            <a href="/web/compounds">Compound info</a>
+            <a href="/web/ratios">Calculate Ratios</a>
+            <a href="/web/upload">Upload Data</a>
         </div>
     </div>
     <div class="main">
@@ -1083,89 +1147,116 @@ def explorer_html():
         }}
 
         // ---------- Build methods list ----------
+        function renderMethodItem(m, parent) {{
+            const group = document.createElement('div');
+            group.className = 'method-group';
+
+            const hdr = document.createElement('div');
+            hdr.className = 'method-group-header';
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = true;
+            cb.dataset.method = m.method;
+            cb.className = 'method-group-cb';
+
+            const lbl = document.createElement('label');
+            lbl.textContent = m.label;
+            lbl.addEventListener('click', () => {{ cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }});
+
+            const toggle = document.createElement('span');
+            toggle.className = 'method-group-toggle';
+            toggle.textContent = '\\u25B6';
+            toggle.title = 'Show/hide columns';
+
+            hdr.appendChild(cb);
+            hdr.appendChild(lbl);
+            hdr.appendChild(toggle);
+            group.appendChild(hdr);
+
+            const colsDiv = document.createElement('div');
+            colsDiv.className = 'method-cols hidden';
+
+            const colActions = document.createElement('div');
+            colActions.style.cssText = 'display:flex;gap:0.3rem;margin-bottom:0.2rem;';
+            const allBtn = document.createElement('button');
+            allBtn.className = 'btn btn-sm';
+            allBtn.textContent = 'All';
+            allBtn.addEventListener('click', (e) => {{
+                e.stopPropagation();
+                colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = true);
+            }});
+            const noneBtn = document.createElement('button');
+            noneBtn.className = 'btn btn-sm btn-outline';
+            noneBtn.textContent = 'None';
+            noneBtn.addEventListener('click', (e) => {{
+                e.stopPropagation();
+                colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = false);
+            }});
+            colActions.appendChild(allBtn);
+            colActions.appendChild(noneBtn);
+            colsDiv.appendChild(colActions);
+
+            m.columns.forEach(col => {{
+                const colLbl = document.createElement('label');
+                const colCb = document.createElement('input');
+                colCb.type = 'checkbox';
+                colCb.checked = true;
+                colCb.className = 'col-cb';
+                colCb.dataset.method = m.method;
+                colCb.dataset.col = col;
+                colLbl.appendChild(colCb);
+                colLbl.appendChild(document.createTextNode(col));
+                colsDiv.appendChild(colLbl);
+            }});
+
+            group.appendChild(colsDiv);
+
+            toggle.addEventListener('click', () => {{
+                colsDiv.classList.toggle('hidden');
+                toggle.textContent = colsDiv.classList.contains('hidden') ? '\\u25B6' : '\\u25BC';
+            }});
+
+            cb.addEventListener('change', () => {{
+                colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = cb.checked);
+            }});
+
+            parent.appendChild(group);
+        }}
+
         function renderMethods(methods) {{
             methodsList.innerHTML = '';
-            methods.forEach(m => {{
-                const group = document.createElement('div');
-                group.className = 'method-group';
+            // Use grouped layout if available
+            const groups = META.method_groups;
+            if (groups && groups.length) {{
+                groups.forEach(grp => {{
+                    const cat = document.createElement('div');
+                    cat.className = 'method-category';
 
-                // Group header
-                const hdr = document.createElement('div');
-                hdr.className = 'method-group-header';
+                    const catHdr = document.createElement('div');
+                    catHdr.className = 'method-category-header';
+                    const chevron = document.createElement('span');
+                    chevron.className = 'cat-chevron';
+                    chevron.textContent = '\\u25BC';
+                    catHdr.appendChild(chevron);
+                    catHdr.appendChild(document.createTextNode(grp.label));
 
-                const cb = document.createElement('input');
-                cb.type = 'checkbox';
-                cb.checked = true;
-                cb.dataset.method = m.method;
-                cb.className = 'method-group-cb';
+                    const catBody = document.createElement('div');
+                    catBody.className = 'method-category-body';
 
-                const lbl = document.createElement('label');
-                lbl.textContent = m.label;
-                lbl.addEventListener('click', () => {{ cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }});
+                    catHdr.addEventListener('click', () => {{
+                        catBody.classList.toggle('hidden');
+                        chevron.textContent = catBody.classList.contains('hidden') ? '\\u25B6' : '\\u25BC';
+                    }});
 
-                const toggle = document.createElement('span');
-                toggle.className = 'method-group-toggle';
-                toggle.textContent = '\\u25B6'; // ▶
-                toggle.title = 'Show/hide columns';
-
-                hdr.appendChild(cb);
-                hdr.appendChild(lbl);
-                hdr.appendChild(toggle);
-                group.appendChild(hdr);
-
-                // Columns list (hidden by default)
-                const colsDiv = document.createElement('div');
-                colsDiv.className = 'method-cols hidden';
-
-                // Select all / none for this group
-                const colActions = document.createElement('div');
-                colActions.style.cssText = 'display:flex;gap:0.3rem;margin-bottom:0.2rem;';
-                const allBtn = document.createElement('button');
-                allBtn.className = 'btn btn-sm';
-                allBtn.textContent = 'All';
-                allBtn.addEventListener('click', (e) => {{
-                    e.stopPropagation();
-                    colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = true);
+                    cat.appendChild(catHdr);
+                    grp.methods.forEach(m => renderMethodItem(m, catBody));
+                    cat.appendChild(catBody);
+                    methodsList.appendChild(cat);
                 }});
-                const noneBtn = document.createElement('button');
-                noneBtn.className = 'btn btn-sm btn-outline';
-                noneBtn.textContent = 'None';
-                noneBtn.addEventListener('click', (e) => {{
-                    e.stopPropagation();
-                    colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = false);
-                }});
-                colActions.appendChild(allBtn);
-                colActions.appendChild(noneBtn);
-                colsDiv.appendChild(colActions);
-
-                m.columns.forEach(col => {{
-                    const colLbl = document.createElement('label');
-                    const colCb = document.createElement('input');
-                    colCb.type = 'checkbox';
-                    colCb.checked = true;
-                    colCb.className = 'col-cb';
-                    colCb.dataset.method = m.method;
-                    colCb.dataset.col = col;
-                    colLbl.appendChild(colCb);
-                    colLbl.appendChild(document.createTextNode(col));
-                    colsDiv.appendChild(colLbl);
-                }});
-
-                group.appendChild(colsDiv);
-
-                // Toggle expand
-                toggle.addEventListener('click', () => {{
-                    colsDiv.classList.toggle('hidden');
-                    toggle.textContent = colsDiv.classList.contains('hidden') ? '\\u25B6' : '\\u25BC';
-                }});
-
-                // Group checkbox controls column checkboxes
-                cb.addEventListener('change', () => {{
-                    colsDiv.querySelectorAll('.col-cb').forEach(c => c.checked = cb.checked);
-                }});
-
-                methodsList.appendChild(group);
-            }});
+            }} else {{
+                methods.forEach(m => renderMethodItem(m, methodsList));
+            }}
         }}
 
         // ---------- Collect user selection ----------
@@ -1487,6 +1578,273 @@ def explorer_html():
         loadMeta();
     }})();
     </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+# ===========================================================================
+# Compound information pages
+# ===========================================================================
+from starlette.responses import FileResponse
+
+from api.compound_info import (
+    compound_index,
+    graphics_abs_path,
+    load_all_compounds,
+)
+
+
+@router.get("/api/compounds")
+def api_compounds():
+    """Return the full list of compound info records."""
+    return {"compounds": load_all_compounds()}
+
+
+@router.get("/api/compounds/graphics/{path:path}")
+def compound_graphic(path: str):
+    """Serve a structure graphic PNG."""
+    abs_path = graphics_abs_path(path)
+    if abs_path is None:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("Not found", status_code=404)
+    return FileResponse(str(abs_path), media_type="image/png")
+
+
+@router.get("/web/compounds", response_class=HTMLResponse)
+def web_compounds_index():
+    """Compound index page — searchable list grouped by class."""
+    compounds = load_all_compounds()
+    title = "OrgChem \u2013 Compound Information"
+
+    # Group by class
+    classes: dict[str, list[dict]] = {}
+    for c in compounds:
+        cls = c["compound_class"] or "Other"
+        classes.setdefault(cls, []).append(c)
+
+    rows_html: list[str] = []
+    for cls in sorted(classes.keys()):
+        for c in classes[cls]:
+            abbrev = escape(c["abbrev1"]) or "&mdash;"
+            name = escape(c["compound_name"]) or "&mdash;"
+            cas = escape(c["cas"]) or ""
+            method = escape(c["method1"]) or ""
+            cls_txt = escape(cls)
+            gfx_icon = "&#128444;" if c["structure_graphic"] else ""
+            key = c["abbrev1"] or c["compound_name"]
+            link = f'/web/compounds/{escape(key, quote=True)}'
+            rows_html.append(
+                f'<tr class="compound-row" data-class="{cls_txt}">'
+                f'<td><a href="{link}">{abbrev}</a></td>'
+                f'<td><a href="{link}">{name}</a></td>'
+                f'<td>{cls_txt}</td>'
+                f'<td>{method}</td>'
+                f'<td>{cas}</td>'
+                f'<td style="text-align:center">{gfx_icon}</td>'
+                f'</tr>'
+            )
+
+    body = "\n".join(rows_html)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>{escape(title)}</title>
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+            margin: 0; padding: 1.5rem 2rem; background: #f5f6fa;
+        }}
+        .card {{
+            background: #fff; border-radius: 8px; padding: 1rem 1.5rem;
+            box-shadow: 0 1px 4px rgba(15,23,42,0.06);
+        }}
+        h1 {{ margin-top: 0; font-size: 1.4rem; }}
+        .meta {{
+            font-size: 0.85rem; color: #6b7280; margin-bottom: 0.75rem;
+            display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center;
+        }}
+        .meta a {{ color: #2563eb; text-decoration: none; }}
+        .meta a:hover {{ text-decoration: underline; }}
+        #search {{
+            padding: 0.35rem 0.6rem; font-size: 0.85rem; border: 1px solid #d1d5db;
+            border-radius: 4px; width: 260px;
+        }}
+        .table-wrap {{
+            max-height: 78vh; overflow: auto; border-radius: 6px;
+            box-shadow: inset 0 0 0 1px #e5e7eb; background: #fff;
+        }}
+        table {{ border-collapse: collapse; width: 100%; font-size: 0.82rem; }}
+        th, td {{ border: 1px solid #e5e7eb; padding: 0.25rem 0.5rem; text-align: left; }}
+        th {{ background: #f1f5f9; position: sticky; top: 0; font-weight: 600; z-index: 1; }}
+        tbody tr:hover {{ background: #e5f3ff; }}
+        a {{ color: #2563eb; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .hidden {{ display: none; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>{escape(title)}</h1>
+        <div class="meta">
+            <span>{len(compounds)} compounds from {len(classes)} classes</span>
+            <span>|</span>
+            <a href="/web/explorer">Data Explorer</a>
+            <span>|</span>
+            <a href="/web/presence">Presence Matrix</a>
+            <span>|</span>
+            <a href="/web/labdata">Lab data</a>
+            <span>|</span>
+            <input type="text" id="search" placeholder="Search by name, abbreviation, CAS…" />
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Abbreviation</th>
+                        <th>Compound Name</th>
+                        <th>Class</th>
+                        <th>Method</th>
+                        <th>CAS</th>
+                        <th>Img</th>
+                    </tr>
+                </thead>
+                <tbody id="tbody">{body}</tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+    (function() {{
+        const search = document.getElementById('search');
+        const rows = document.querySelectorAll('.compound-row');
+        search.addEventListener('input', () => {{
+            const q = search.value.trim().toLowerCase();
+            rows.forEach(r => {{
+                r.classList.toggle('hidden', q !== '' && !r.textContent.toLowerCase().includes(q));
+            }});
+        }});
+    }})();
+    </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+@router.get("/web/compounds/{compound_key}", response_class=HTMLResponse)
+def web_compound_detail(compound_key: str):
+    """Compound detail page showing all available info and structure graphic."""
+    from urllib.parse import quote as url_quote
+
+    idx = compound_index()
+    norm = compound_key.strip().lower().replace(" ", "").replace("-", "")
+    entry = idx.get(norm)
+    if not entry:
+        return HTMLResponse(
+            content=f'<html><body><h1>Compound not found</h1>'
+            f'<p>No compound info for <b>{escape(compound_key)}</b>.</p>'
+            f'<p><a href="/web/compounds">Back to compound list</a></p></body></html>',
+            status_code=404,
+        )
+
+    name = entry["compound_name"] or entry["abbrev1"]
+    title = f"OrgChem \u2013 {name}"
+
+    # Info rows
+    info_rows: list[str] = []
+    fields = [
+        ("Compound Name", "compound_name"),
+        ("Abbreviation", "abbrev1"),
+        ("Abbreviation 2", "abbrev2"),
+        ("Compound Class", "compound_class"),
+        ("Compound Class 2", "compound_class2"),
+        ("Method 1", "method1"),
+        ("Method 2", "method2"),
+        ("Ion Trace (Method 1)", "method1_iontrace"),
+        ("Ion Trace (Method 2)", "method2_iontrace"),
+        ("Peak", "peak"),
+        ("CAS", "cas"),
+        ("Molecular Formula", "formula"),
+        ("InChI", "inchi"),
+        ("Source File", "source"),
+    ]
+    for label, key in fields:
+        val = entry.get(key, "")
+        if not val:
+            continue
+        display = escape(val)
+        if key == "cas" and val:
+            display = f'<a href="https://commonchemistry.cas.org/detail?cas_rn={url_quote(val)}" target="_blank" rel="noopener">{escape(val)}</a>'
+        elif key == "inchi" and val:
+            display = f'<span style="font-family:monospace;font-size:0.78rem;word-break:break-all">{escape(val)}</span>'
+        info_rows.append(f'<tr><th>{escape(label)}</th><td>{display}</td></tr>')
+
+    info_html = "\\n".join(info_rows)
+
+    # Structure graphic
+    graphic_html = ""
+    if entry["structure_graphic"]:
+        gfx_url = f"/api/compounds/graphics/{entry['structure_graphic']}"
+        graphic_html = (
+            f'<div class="graphic-box">'
+            f'<h2>Structure</h2>'
+            f'<img src="{escape(gfx_url)}" alt="Structure of {escape(name)}" />'
+            f'</div>'
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>{escape(title)}</title>
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+            margin: 0; padding: 1.5rem 2rem; background: #f5f6fa;
+        }}
+        .card {{
+            background: #fff; border-radius: 8px; padding: 1.2rem 1.5rem;
+            box-shadow: 0 1px 4px rgba(15,23,42,0.06); margin-bottom: 1rem;
+        }}
+        h1 {{ margin-top: 0; font-size: 1.4rem; }}
+        h2 {{ font-size: 1.1rem; margin-top: 0; }}
+        .meta {{
+            font-size: 0.85rem; color: #6b7280; margin-bottom: 0.5rem;
+        }}
+        .meta a {{ color: #2563eb; text-decoration: none; }}
+        .meta a:hover {{ text-decoration: underline; }}
+        .info-table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; }}
+        .info-table th {{
+            text-align: right; padding: 0.3rem 0.8rem 0.3rem 0;
+            color: #475569; font-weight: 600; white-space: nowrap; vertical-align: top;
+            width: 160px;
+        }}
+        .info-table td {{ padding: 0.3rem 0; color: #1e293b; }}
+        .graphic-box {{ text-align: center; }}
+        .graphic-box img {{
+            max-width: 400px; max-height: 350px; border: 1px solid #e5e7eb;
+            border-radius: 6px; padding: 0.5rem; background: #fff;
+        }}
+        a {{ color: #2563eb; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>{escape(name)}</h1>
+        <div class="meta">
+            <a href="/web/compounds">&larr; All compounds</a>
+            &nbsp;|&nbsp;
+            <a href="/web/explorer">Data Explorer</a>
+            &nbsp;|&nbsp;
+            <a href="/web/presence">Presence Matrix</a>
+        </div>
+        <table class="info-table">{info_html}</table>
+    </div>
+    {graphic_html if graphic_html else ""}
 </body>
 </html>"""
     return HTMLResponse(content=html)

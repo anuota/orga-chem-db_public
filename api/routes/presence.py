@@ -4,9 +4,11 @@ from __future__ import annotations
 import csv
 import io
 import logging
-import re
+import os
+import zipfile
 
 from html import escape
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Request
@@ -16,7 +18,8 @@ from api.shared import (
     ALLOWED_TABLES,
     TABLE_ALIASES,
     PRESENCE_METHOD_LABELS,
-    FT_MODE_LABELS,
+    FT_MODE_TO_VIRTUAL,
+    canonical_ft_mode,
     canonical_table_name,
     method_label,
     run_query_with_rls,
@@ -49,9 +52,23 @@ def presence_method_category(name: str) -> str:
 
 def presence_method_link(name: str) -> str:
     method = canonical_table_name(name)
+    if method == "ft_icr_ms_appipos":
+        return "/web/labdata/ft-icr-ms?method=APPIpos"
+    if method == "ft_icr_ms_esineg":
+        return "/web/labdata/ft-icr-ms?method=ESIneg"
+    if method == "ft_icr_ms_esipos":
+        return "/web/labdata/ft-icr-ms?method=ESIpos"
     if method.startswith("ft_icr_ms"):
         return "/web/labdata/ft-icr-ms"
     return f"/web/matrix/{method}"
+
+
+def _canonical_ft_mode(value: str | None) -> str | None:
+    return canonical_ft_mode(value)
+
+
+def _ft_root() -> Path:
+    return Path(os.getenv("ORG_CHEM_FT_ROOT", "/ftdata"))
 
 
 def canonical_presence_col(col: str) -> str:
@@ -71,13 +88,6 @@ def presence_alias_cols(col: str) -> list[str]:
         if canon == method:
             out.append(f"has_{alias}")
     return out
-
-
-def _canonical_ft_mode(value: str | None) -> str | None:
-    if not value:
-        return None
-    key = re.sub(r"[^a-z0-9]+", "", str(value).lower())
-    return FT_MODE_LABELS.get(key, str(value))
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +134,15 @@ def presence_html(request: Request):
     for c in ft_split_cols:
         if c not in method_cols:
             method_cols.append(c)
-    method_cols = sorted(method_cols)
+    # Sort by data category (GC → FT → Isotope), then alphabetically within group
+    _CAT_ORDER = {"gc": 0, "ft": 1, "isotope": 2}
+    method_cols = sorted(
+        method_cols,
+        key=lambda c: (
+            _CAT_ORDER.get(presence_method_category(c[4:] if c.startswith("has_") else c), 9),
+            c,
+        ),
+    )
 
     # Build sample -> FT mode presence map so split FT columns are data-driven.
     ft_presence_map: dict[str, set[str]] = {}
@@ -177,6 +195,29 @@ def presence_html(request: Request):
             "</th>"
         )
     header_html = "".join(header_cells)
+
+    # --------- group header row (GC / FT / Isotope spans) ----------
+    _GROUP_LABELS = {"gc": "GC", "ft": "FT-ICR-MS", "isotope": "Isotopes"}
+    group_cells = []
+    # Empty cells for selection + sample columns
+    group_cells.append('<th class="select-col group-header-empty"></th>')
+    group_cells.append('<th class="sample-col group-header-empty"></th>')
+    # Build consecutive category spans
+    runs: list[tuple[str, int]] = []
+    for c in method_cols:
+        method = c[4:] if c.startswith("has_") else c
+        cat = presence_method_category(method)
+        if runs and runs[-1][0] == cat:
+            runs[-1] = (cat, runs[-1][1] + 1)
+        else:
+            runs.append((cat, 1))
+    for cat, span in runs:
+        label = _GROUP_LABELS.get(cat, cat.upper())
+        group_cells.append(
+            f'<th class="group-header cat-{escape(cat)}" colspan="{span}">'
+            f'{escape(label)}</th>'
+        )
+    group_header_html = "".join(group_cells)
 
     # --------- filter row ----------
     filter_cells = []
@@ -325,7 +366,8 @@ def presence_html(request: Request):
             background: #ffffff;
         }}
         table {{
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
             table-layout: fixed;
             width: max-content;
             min-width: 100%;
@@ -334,7 +376,7 @@ def presence_html(request: Request):
         thead {{
             position: sticky;
             top: 0;
-            z-index: 1;
+            z-index: 3;
         }}
         th, td {{
             border: 1px solid #e5e7eb;
@@ -370,6 +412,19 @@ def presence_html(request: Request):
             min-width: 32px;
             max-width: 32px;
             text-align: center;
+            position: sticky;
+            left: 0;
+            z-index: 1;
+            background: #f1f5f9;
+        }}
+        tbody .select-cell {{
+            background: #ffffff;
+        }}
+        tbody tr:nth-child(even) .select-cell {{
+            background: #f9fafb;
+        }}
+        tbody tr:hover .select-cell {{
+            background: #e5f3ff;
         }}
         .sample-col,
         .sample-cell {{
@@ -378,6 +433,23 @@ def presence_html(request: Request):
             max-width: 7ch;
             text-align: left;
             white-space: nowrap;
+            position: sticky;
+            left: 32px;
+            z-index: 1;
+            background: #f1f5f9;
+        }}
+        tbody .sample-cell {{
+            background: #ffffff;
+        }}
+        tbody tr:nth-child(even) .sample-cell {{
+            background: #f9fafb;
+        }}
+        tbody tr:hover .sample-cell {{
+            background: #e5f3ff;
+        }}
+        thead .select-col,
+        thead .sample-col {{
+            z-index: 4;
         }}
         .method-header {{
             writing-mode: vertical-rl;
@@ -405,6 +477,30 @@ def presence_html(request: Request):
         .method-header.cat-isotope {{
             background: #bbf7d0;
         }}
+        .group-row th {{
+            text-align: center;
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            padding: 0.3rem 0.25rem;
+            border-bottom: 2px solid #cbd5e1;
+        }}
+        .group-header-empty {{
+            background: #f1f5f9;
+            border-bottom: 2px solid #cbd5e1;
+        }}
+        .group-header.cat-gc {{
+            background: #cbd5e1;
+            color: #1e293b;
+        }}
+        .group-header.cat-ft {{
+            background: #93c5fd;
+            color: #1e3a5f;
+        }}
+        .group-header.cat-isotope {{
+            background: #86efac;
+            color: #14532d;
+        }}
         .filter-row td {{
             background: #e5ecf7;
         }}
@@ -429,6 +525,10 @@ def presence_html(request: Request):
         .filter-row .bool-cell {{
             cursor: pointer;
         }}
+        .filter-row .select-col,
+        .filter-row .sample-col {{
+            background: #e5ecf7;
+        }}
     </style>
 </head>
 <body>
@@ -444,6 +544,10 @@ def presence_html(request: Request):
                     <span>|</span>
                     <span><a href="/web/explorer">Data Explorer</a></span>
                     <span>|</span>
+                    <span><a href="/web/ratios">Calculate Ratios</a></span>
+                    <span>|</span>
+                    <span><a href="/web/upload">Upload Data</a></span>
+                    <span>|</span>
                     <span><a href="{escape(json_link)}" target="_blank" rel="noopener">View JSON API</a></span>
                     <label>
                         Search:
@@ -457,6 +561,7 @@ def presence_html(request: Request):
             <div class="table-wrap">
                 <table>
                     <thead>
+                        <tr class="group-row">{group_header_html}</tr>
                         <tr>{header_html}</tr>
                         <tr class="filter-row">{filter_row_html}</tr>
                     </thead>
@@ -701,6 +806,10 @@ def sample_filter_html(request: Request):
             <span>|</span>
             <span><a href="/web/explorer">Data Explorer</a></span>
             <span>|</span>
+            <span><a href="/web/ratios">Calculate Ratios</a></span>
+            <span>|</span>
+            <span><a href="/web/upload">Upload Data</a></span>
+            <span>|</span>
             <span><a href="/web/labdata">Lab data page</a></span>
             <span>|</span>
             <span>Select samples by metadata (extendable)</span>
@@ -816,9 +925,14 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
     samples = sorted(set(samples))
     method_filter_raw = [x.strip() for x in (m or "").split(",") if x.strip()]
     method_filter: list[str] = []
+    _ft_virtual_set = set(FT_MODE_TO_VIRTUAL.values())
     for m_name in method_filter_raw:
         cm = canonical_table_name(m_name)
-        if cm in ALLOWED_TABLES and cm not in method_filter:
+        if cm in _ft_virtual_set:
+            # Virtual FT method: ensure real ft_icr_ms is in the scan list
+            if "ft_icr_ms" not in method_filter:
+                method_filter.append("ft_icr_ms")
+        elif cm in ALLOWED_TABLES and cm not in method_filter:
             method_filter.append(cm)
     if not samples:
         return HTMLResponse(
@@ -835,32 +949,75 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
     selected_set = set(samples)
 
     def pretty_method(name: str) -> str:
-        return method_label(name)
+        return presence_method_label(name)
 
     # ---- Build combined data matrix in Python ----
     matrix_rows: dict[str, dict] = {sn: {"samplenumber": sn} for sn in selected_set}
     group_cols: dict[str, list[str]] = {}
     col_labels: dict[str, str] = {}
+    # Track FT original CSV paths: {(samplenumber, virtual_method) -> source_file}
+    ft_source_files: dict[tuple[str, str], str] = {}
 
     def presence_col_id(method: str) -> str:
         return f"{method}__PRESENCE"
 
+    def _add_data_to_matrix(method: str, sn: str, data: dict) -> None:
+        gcols = group_cols.setdefault(method, [])
+        pres_id = presence_col_id(method)
+        if pres_id not in gcols:
+            gcols.append(pres_id)
+            col_labels[pres_id] = "has"
+        row = matrix_rows.setdefault(sn, {"samplenumber": sn})
+        any_value = False
+        for k, v in data.items():
+            col_id = f"{method}__{k}"
+            if col_id not in gcols:
+                gcols.append(col_id)
+                col_labels[col_id] = str(k)
+            if col_id not in row or row[col_id] in (None, ""):
+                row[col_id] = v
+            if v not in (None, ""):
+                any_value = True
+        if any_value:
+            row[pres_id] = True
+
     methods_to_scan = method_filter if method_filter else sorted(ALLOWED_TABLES)
     for method in methods_to_scan:
         view_name = f"public.{method}_entries"
+
+        if method == "ft_icr_ms":
+            # Split FT-ICR-MS into per-mode virtual methods
+            try:
+                sql = "SELECT samplenumber, method, notes, data FROM public.ft_icr_ms_entries"
+                _, ft_rows = run_query_with_rls(sql, request)
+            except Exception as e:
+                logger.warning("Skipping method %s in selected view: %s", method, e)
+                continue
+            for r in ft_rows:
+                sn = r.get("samplenumber")
+                if sn not in selected_set:
+                    continue
+                data = r.get("data") or {}
+                if not isinstance(data, dict):
+                    continue
+                mode = _canonical_ft_mode(r.get("method") or r.get("data_type"))
+                virtual = FT_MODE_TO_VIRTUAL.get(mode, "ft_icr_ms")
+                # Track original CSV path for ZIP download
+                src = data.get("source_file")
+                if src:
+                    ft_source_files[(str(sn), virtual)] = str(src)
+                _add_data_to_matrix(virtual, str(sn), data)
+            continue
+
         try:
             sql = f"SELECT samplenumber, data FROM {view_name}"
-            cols, rows = run_query_with_rls(sql, request)
+            _, rows = run_query_with_rls(sql, request)
         except Exception as e:
             logger.warning("Skipping method %s in selected view: %s", method, e)
             continue
 
         if not rows:
             continue
-
-        method_has_selected = False
-        gcols = None
-        pres_id = None
 
         for r in rows:
             sn = r.get("samplenumber")
@@ -869,35 +1026,16 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
             data = r.get("data") or {}
             if not isinstance(data, dict):
                 continue
+            _add_data_to_matrix(method, str(sn), data)
 
-            if not method_has_selected:
-                method_has_selected = True
-                gcols = group_cols.setdefault(method, [])
-                pres_id = presence_col_id(method)
-                if pres_id not in gcols:
-                    gcols.append(pres_id)
-                    col_labels[pres_id] = "has"
-            else:
-                gcols = group_cols[method]
-                pres_id = presence_col_id(method)
-
-            row = matrix_rows.setdefault(sn, {"samplenumber": sn})
-            any_value = False
-
-            for k, v in data.items():
-                col_id = f"{method}__{k}"
-                if col_id not in gcols:
-                    gcols.append(col_id)
-                    col_labels[col_id] = str(k)
-                if col_id not in row or row[col_id] in (None, ""):
-                    row[col_id] = v
-                if v not in (None, ""):
-                    any_value = True
-
-            if any_value and pres_id is not None:
-                row[pres_id] = True
-
-    ordered_methods = [x for x in methods_to_scan if x in group_cols and group_cols[x]]
+    # Build ordered list; replace ft_icr_ms with any virtual FT methods that appeared
+    ft_virtual_methods = [v for v in ("ft_icr_ms_appipos", "ft_icr_ms_esineg", "ft_icr_ms_esipos") if v in group_cols]
+    ordered_methods = []
+    for x in methods_to_scan:
+        if x == "ft_icr_ms":
+            ordered_methods.extend(ft_virtual_methods)
+        elif x in group_cols and group_cols[x]:
+            ordered_methods.append(x)
 
     if not ordered_methods:
         return HTMLResponse(
@@ -923,31 +1061,49 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
         all_columns.extend(ordered)
 
     if (format or "").lower() == "csv":
-        csv_buf = io.StringIO()
-        writer = csv.writer(csv_buf)
-        csv_header = ["samplenumber"]
-        for meth in ordered_methods:
-            for cid in group_cols[meth]:
-                if cid == presence_col_id(meth):
-                    csv_header.append(f"{pretty_method(meth)}: has")
-                else:
-                    csv_header.append(f"{pretty_method(meth)}: {col_labels.get(cid, cid)}")
-        writer.writerow(csv_header)
-        for sn in samples:
-            row = matrix_rows.get(sn, {"samplenumber": sn})
-            out = [sn]
+        zip_buf = io.BytesIO()
+        ft_root = _ft_root()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for meth in ordered_methods:
+                is_ft_virtual = meth in FT_MODE_TO_VIRTUAL.values()
+
+                # --- Per-method CSV with summary / analytical data ---
+                csv_buf = io.StringIO()
+                writer = csv.writer(csv_buf)
+                csv_header = ["samplenumber"]
                 for cid in group_cols[meth]:
-                    val = row.get(cid, "")
                     if cid == presence_col_id(meth):
-                        out.append("1" if bool(val) else "")
+                        csv_header.append("has")
                     else:
-                        out.append("" if val in (None, "") else str(val))
-            writer.writerow(out)
+                        csv_header.append(col_labels.get(cid, cid))
+                writer.writerow(csv_header)
+                for sn in samples:
+                    row = matrix_rows.get(sn, {"samplenumber": sn})
+                    out = [sn]
+                    for cid in group_cols[meth]:
+                        val = row.get(cid, "")
+                        if cid == presence_col_id(meth):
+                            out.append("1" if bool(val) else "")
+                        else:
+                            out.append("" if val in (None, "") else str(val))
+                    writer.writerow(out)
+                zf.writestr(f"{pretty_method(meth)}.csv", csv_buf.getvalue())
+
+                # --- For FT virtual methods, include original CSV files ---
+                if is_ft_virtual and ft_root:
+                    for sn in samples:
+                        src = ft_source_files.get((sn, meth))
+                        if not src:
+                            continue
+                        abs_path = ft_root / src
+                        if abs_path.is_file():
+                            arc_name = f"{pretty_method(meth)}/{sn}_{abs_path.name}"
+                            zf.write(str(abs_path), arc_name)
+
         return Response(
-            content=csv_buf.getvalue(),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="selected_samples_matrix.csv"'},
+            content=zip_buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="selected_samples.zip"'},
         )
 
     # ---- Build HTML ----
@@ -1121,7 +1277,8 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
             background: #ffffff;
         }}
         table {{
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
             table-layout: fixed;
             width: max-content;
             min-width: 100%;
@@ -1130,7 +1287,7 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
         thead {{
             position: sticky;
             top: 0;
-            z-index: 1;
+            z-index: 3;
         }}
         th, td {{
             border: 1px solid #e5e7eb;
@@ -1152,15 +1309,26 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
             background: #e5f3ff;
         }}
         .sample-header {{
-            min-width: 7ch;
-            max-width: 7ch;
+            min-width: 10ch;
             vertical-align: bottom;
+            position: sticky;
+            left: 0;
+            z-index: 4;
+            background: #f1f5f9;
         }}
         .sample-cell {{
-            width: 7ch;
-            min-width: 7ch;
-            max-width: 7ch;
+            min-width: 10ch;
             white-space: nowrap;
+            position: sticky;
+            left: 0;
+            z-index: 1;
+            background: #ffffff;
+        }}
+        tbody tr:nth-child(even) .sample-cell {{
+            background: #f9fafb;
+        }}
+        tbody tr:hover .sample-cell {{
+            background: #e5f3ff;
         }}
         .group-header {{
             text-align: center;
@@ -1241,9 +1409,13 @@ def presence_selected_html(request: Request, s: str | None = None, m: str | None
                     <span>|</span>
                     <span><a href="/web/explorer">Data Explorer</a></span>
                     <span>|</span>
+                    <span><a href="/web/ratios">Calculate Ratios</a></span>
+                    <span>|</span>
+                    <span><a href="/web/upload">Upload Data</a></span>
+                    <span>|</span>
                     <span><a href="/web/labdata">Lab data page</a></span>
                     <span>|</span>
-                    <span><a href="/web/presence/selected?{csv_qs}">Download CSV</a></span>
+                    <span><a href="/web/presence/selected?{csv_qs}">Download ZIP</a></span>
                 </div>
             </div>
             <div class="matrix-layout">

@@ -25,6 +25,9 @@ node_modules/
 # Data and outputs
 /data/
 app/data/
+!app/data/compound_info/
+!app/data/column_order.json
+!app/data/column_display_names.json
 outputs/
 mmd_plots/
 WARP.md

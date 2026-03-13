@@ -137,7 +137,7 @@ class TableIngestor:
         """
         If this is the n-alkanes analysis, rewrite per-entry 'data' keys using the synonyms map.
         """
-        if analysis_name != "n_alkanes_isoprenoids":
+        if analysis_name != "alkanes":
             return rows
         # load or cache synonyms map
         synmap = self._synmap_cache.get(analysis_name)

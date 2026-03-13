@@ -252,7 +252,7 @@ def _discover_ft_files(root_dir: str) -> list[str]:
     return sorted(set(out))
 
 
-def _build_ft_rows(csv_path: str) -> list[dict]:
+def _build_ft_rows(csv_path: str, *, root_dir: str | None = None) -> list[dict]:
     sample = normalize_sample_number(Path(csv_path).name)
     if not sample:
         logger.warning("Skipping FT file without sample id in filename: %s", csv_path)
@@ -264,11 +264,14 @@ def _build_ft_rows(csv_path: str) -> list[dict]:
         logger.warning("Skipping FT file without acquisition mode: %s", csv_path)
         return []
 
-    entries: list[dict] = []
+    peak_count = 0
+    sn_values: list[float] = []
+    mass_values: list[float] = []
+
     with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            payload: dict[str, object] = {}
+            has_data = False
             for k, v in row.items():
                 if k is None:
                     continue
@@ -278,28 +281,51 @@ def _build_ft_rows(csv_path: str) -> list[dict]:
                 cleaned = _clean_cell(v)
                 if cleaned is None:
                     continue
-                payload[key] = cleaned
+                has_data = True
 
-            if not payload:
-                continue
+                if key == "signalNoise_ratio" and isinstance(cleaned, (int, float)):
+                    sn_values.append(float(cleaned))
+                elif key == "observedExactMass_ion" and isinstance(cleaned, (int, float)):
+                    mass_values.append(float(cleaned))
 
-            entry = _to_entry(
-                raw_sample=sample,
-                operator=operator,
-                data=payload,
-                sample_type="ft_icr_ms",
-                fraction=None,
-                instrument="FT-ICR-MS",
-                data_type=mode,
-                method=mode,
-                notes=Path(csv_path).name,
-            )
-            entries.append(entry)
+            if has_data:
+                peak_count += 1
 
-    if not entries:
+    if peak_count == 0:
         return []
 
-    return [{"samplenumber": sample, FT_TABLE: {"entries": entries}}]
+    # Compute relative path from root for file-download linkage
+    source_file = Path(csv_path).name
+    if root_dir:
+        try:
+            source_file = str(Path(csv_path).relative_to(root_dir))
+        except ValueError:
+            pass
+
+    summary: dict[str, object] = {
+        "peak_count": peak_count,
+        "source_file": source_file,
+    }
+    if sn_values:
+        summary["min_signal_to_noise"] = round(min(sn_values), 2)
+        summary["max_signal_to_noise"] = round(max(sn_values), 2)
+    if mass_values:
+        summary["min_mass"] = round(min(mass_values), 4)
+        summary["max_mass"] = round(max(mass_values), 4)
+
+    entry = _to_entry(
+        raw_sample=sample,
+        operator=operator,
+        data=summary,
+        sample_type="ft_icr_ms",
+        fraction=None,
+        instrument="FT-ICR-MS",
+        data_type=mode,
+        method=mode,
+        notes=Path(csv_path).name,
+    )
+
+    return [{"samplenumber": sample, FT_TABLE: {"entries": [entry]}}]
 
 
 def _discover_isotope_files(root_dir: str, kind: str | None = None) -> list[str]:
@@ -432,7 +458,7 @@ def ingest_ft(*, root_dir: str, single_file: str | None = None, dry_run: bool = 
         _ensure_family_tables_and_views(conn, [FT_TABLE])
         total = 0
         for p in files:
-            rows = _build_ft_rows(p)
+            rows = _build_ft_rows(p, root_dir=root_dir)
             total += _upsert_family_rows(conn, FT_TABLE, rows)
         _ensure_presence_and_acl(conn)
     logger.info("FT ingest complete, upserted rows: %d", total)

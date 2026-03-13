@@ -55,7 +55,9 @@ def test_presence_method_category(name, expected):
 
 def test_presence_method_link_ft():
     assert presence_method_link("ft_icr_ms") == "/web/labdata/ft-icr-ms"
-    assert presence_method_link("ft_icr_ms_appipos") == "/web/labdata/ft-icr-ms"
+    assert presence_method_link("ft_icr_ms_appipos") == "/web/labdata/ft-icr-ms?method=APPIpos"
+    assert presence_method_link("ft_icr_ms_esineg") == "/web/labdata/ft-icr-ms?method=ESIneg"
+    assert presence_method_link("ft_icr_ms_esipos") == "/web/labdata/ft-icr-ms?method=ESIpos"
 
 
 def test_presence_method_link_gc():
@@ -69,7 +71,7 @@ def test_presence_method_link_gc():
 @pytest.mark.parametrize(
     "col, expected",
     [
-        ("has_alkanes", "has_n_alkanes_isoprenoids"),
+        ("has_alkanes", "has_alkanes"),
         ("has_wo", "has_whole_oil"),
         ("has_hopanes", "has_hopanes"),
         ("samplenumber", "samplenumber"),  # non has_ col unchanged
@@ -84,9 +86,9 @@ def test_canonical_presence_col(col, expected):
 # ---------------------------------------------------------------------------
 
 def test_presence_alias_cols_with_aliases():
-    cols = presence_alias_cols("has_n_alkanes_isoprenoids")
-    assert "has_n_alkanes_isoprenoids" in cols
+    cols = presence_alias_cols("has_alkanes")
     assert "has_alkanes" in cols
+    assert "has_n_alkanes_isoprenoids" in cols
 
 
 def test_presence_alias_cols_no_alias():

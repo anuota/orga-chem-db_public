@@ -12,6 +12,17 @@ from .header_normalize import normalize_data_payload
 
 logger = logging.getLogger(__name__)
 
+
+def _open_csv(path: str):
+    """Open a CSV file, trying utf-8-sig first then falling back to cp1252."""
+    try:
+        f = open(path, "r", encoding="utf-8-sig", newline="")
+        f.read(512)  # probe for decode errors
+        f.seek(0)
+        return f
+    except UnicodeDecodeError:
+        return open(path, "r", encoding="cp1252", newline="")
+
 DATA_META_KEYS = {"samplenumber", "name", "type", "date", "measured_at"}
 TYPE_KEYS = {
     "type",
@@ -48,7 +59,7 @@ def collect_data_keys_from_csv(csv_path: str) -> set[str]:
         raise FileNotFoundError(csv_path)
     keys: set[str] = set()
     header: list[str] | None = None
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+    with _open_csv(csv_path) as f:
         reader = csv.reader(f)
         for raw in reader:
             if not raw or all((c or "").strip() == "" for c in raw):
@@ -86,7 +97,7 @@ class CsvParseStrategy(Protocol):
 class _AlkaneNameResolver:
     """
     Подтягивает synonym -> canonical_name из ref-таблиц и кэширует.
-    Активен только для анализа 'n_alkanes_isoprenoids'.
+    Активен только для анализа 'alkanes'.
     """
     _cache: dict[str, str] | None = None
 
@@ -102,11 +113,11 @@ class _AlkaneNameResolver:
     def resolve(cls, header: str, *, analysis: str | None) -> tuple[str, str]:
         """
         Вернёт (resolved_key, original_header).
-        Для не n_alkanes_isoprenoids возвращает (header, header).
+        Для не alkanes возвращает (header, header).
         """
         if not header:
             return header, header
-        if analysis != "n_alkanes_isoprenoids":
+        if analysis != "alkanes":
             return header, header
         if cls._cache is None:
             cls._cache = cls._load_map()
@@ -170,7 +181,7 @@ def rows_from_multiheader_csv_grouped(
         raise FileNotFoundError(f"File not found: {csv_path}")
 
     temp_rows: list[dict] = []
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+    with _open_csv(csv_path) as f:
         reader = csv.reader(f)
         header: list[str] | None = None
 

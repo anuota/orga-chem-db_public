@@ -19,7 +19,7 @@ from api.shared import (
     "raw, expected",
     [
         ("hopanes", "hopanes"),
-        ("alkanes", "n_alkanes_isoprenoids"),
+        ("alkanes", "alkanes"),
         ("wo", "whole_oil"),
         ("whole_oil_gc", "whole_oil"),
         ("ft_icrms", "ft_icr_ms"),
@@ -45,9 +45,9 @@ def test_canonical_table_name(raw, expected):
         ("isotope_co2_werte", "Isotope CO2 Werte"),
         ("isotope_hd_werte", "Isotope HD Werte"),
         ("hopanes", "Hopanes"),
-        ("n_alkanes_isoprenoids", "N Alkanes Isoprenoids"),
+        ("alkanes", "Alkanes"),
         # aliases resolve first
-        ("alkanes", "N Alkanes Isoprenoids"),
+        ("n_alkanes_isoprenoids", "Alkanes"),
         ("wo", "Whole Oil"),
     ],
 )

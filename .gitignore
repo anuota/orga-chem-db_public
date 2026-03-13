@@ -1,12 +1,113 @@
+WARP.md
+*.env*
+.env.dev
+# Compiled source #
+###################
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Packages #
+############
+# it's better to unpack these files and commit the raw source
+# git has its own built in compression methods
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Logs and databases #
+######################
+*.log
+*.sql
+*.sqlite
+!migrations/
+!migrations/*.sql
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+.mypy_cache/
+.pytype/
+.pyre/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.cache/
+
+# === Jupyter / notebooks ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === Local data & generated artifacts ===
+# Raw input data and exports (adjust paths to your repo layout)
+/data/**
+/data_insert_trial/**
+/backups/**
+*.csv
+!app/data/column_names/*.csv
+!app/data/compound_info/*.csv
+*.tsv
+*.parquet
+*.feather
+*.xlsx
+*.xls
+
+# === Docker / Compose ===
+# Never commit real secrets; keep an example file instead
 .env
 .env.*
-*.key
+!.env.example
+# Compose override files and local only settings
+*docker-compose.override.yml
+compose/.env
+
+# === Editor / IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Node / frontend (if added later) ===
+node_modules/
+dist/
+build/
+*.map
+
+# === Certificates / keys (DO NOT COMMIT) ===
 *.pem
-*.p12
-__pycache__/
-*.pyc
-data/private/
-exports/
-dumps/
-tmp/
-.DS_Store
+*.key
+*.crt
+id_rsa*
+id_ed25519*
+
+# === PostgreSQL dumps ===
+*.dump
+*.sql.gz
+
+.ft_validation.json

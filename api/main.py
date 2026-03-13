@@ -16,6 +16,8 @@ from api.shared import (
 from api.routes.presence import router as presence_router
 from api.routes.explorer import router as explorer_router
 from api.routes.lab import router as lab_router
+from api.routes.ratios import router as ratios_router
+from api.routes.upload import router as upload_router
 
 # -----------------
 # App & DB helpers
@@ -24,6 +26,8 @@ app = FastAPI(title="OrgChem API", version="0.1.0")
 app.include_router(presence_router)
 app.include_router(explorer_router)
 app.include_router(lab_router)
+app.include_router(ratios_router)
+app.include_router(upload_router)
 
 
 @app.get("/", include_in_schema=False)

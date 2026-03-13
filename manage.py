@@ -70,7 +70,7 @@ def migrate(
 @app.command("ingest")
 def ingest(
     env_file: Optional[str] = typer.Option(None, help="Path to .env (defaults to repo .env)"),
-    data_dir: Optional[str] = typer.Option(None, help="Override ORG_CHEM_DATA_DIR"),
+    data_dir: Optional[str] = typer.Option(None, help="Override GC CSV directory (default: ORG_CHEM_FT_ROOT/GC-DataForDatabase)"),
     reset: bool = typer.Option(False, "--reset", help="Drop schema public and re-create before ingest"),
 ):
     """

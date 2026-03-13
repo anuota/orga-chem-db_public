@@ -37,7 +37,7 @@ def parse_gc_filename(filename: str) -> dict[str, str | None]:
     Returns dict with:
         instrument  - e.g. 'GCFID', 'GCMS', 'GCMRMMS', or None
         fraction    - e.g. 'aliphatic', 'aromatic', 'NSO', 'NSOsilyl', or None
-        method      - canonical method name (e.g. 'steranes', 'n_alkanes_isoprenoids', 'whole_oil')
+        method      - canonical method name (e.g. 'steranes', 'alkanes', 'whole_oil')
         data_type   - 'Area' or 'Concentration', or None
     """
     stem = os.path.basename(filename)

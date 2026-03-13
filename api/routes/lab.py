@@ -12,13 +12,18 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 
+from api.compound_info import compound_index as _compound_index
 from api.shared import (
     ALLOWED_TABLES,
     LAB_METHODS,
     FT_MODE_LABELS,
+    FT_MODE_TO_VIRTUAL,
     MATRIX_META_FIELDS,
     MATRIX_META_LABELS,
+    canonical_ft_mode,
     canonical_table_name,
+    column_display_name,
+    csv_column_order,
     method_label,
     run_query_with_rls,
 )
@@ -58,11 +63,7 @@ def _method_stats(method: str, request: Request) -> dict[str, Any]:
     return stats
 
 
-def _canonical_ft_mode(value: str | None) -> str | None:
-    if not value:
-        return None
-    key = re.sub(r"[^a-z0-9]+", "", str(value).lower())
-    return FT_MODE_LABELS.get(key, str(value))
+_canonical_ft_mode = canonical_ft_mode  # backward-compat alias for tests
 
 
 def _ft_root() -> Path:
@@ -137,46 +138,48 @@ def _ft_measurement_rows(
     request: Request,
     limit: int,
     samplenumber: str | None = None,
+    method: str | None = None,
 ) -> list[dict[str, Any]]:
     lim = max(1, min(int(limit), 20000))
-    where = ""
+    conditions: list[str] = []
+    params: list = []
     if samplenumber:
         if not re.match(r"^[A-Za-z0-9_.:-]+$", samplenumber):
             raise HTTPException(400, "Invalid samplenumber format")
-        safe_sample = samplenumber.replace("'", "''")
-        where = f" WHERE samplenumber = '{safe_sample}'"
+        conditions.append("samplenumber = %s")
+        params.append(samplenumber)
+    if method:
+        canon = _canonical_ft_mode(method)
+        if canon not in {"APPIpos", "ESIneg", "ESIpos"}:
+            raise HTTPException(400, "Invalid FT-ICR-MS method")
+        conditions.append("COALESCE(NULLIF(method, ''), NULLIF(data_type, '')) = %s")
+        params.append(canon)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
 
     sql_text = f"""
         SELECT
             samplenumber,
-            operator,
-            measurement_date,
-            method,
+            COALESCE(NULLIF(name, ''), NULLIF(measured_by, '')) AS operator,
+            date AS measurement_date,
+            COALESCE(NULLIF(method, ''), NULLIF(data_type, '')) AS method,
             notes,
-            COUNT(*) AS peak_count,
-            MIN(
-                CASE
-                    WHEN (data->>'signalNoise_ratio') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-                    THEN (data->>'signalNoise_ratio')::double precision
-                    ELSE NULL
-                END
-            ) AS min_signal_to_noise
-        FROM (
-            SELECT
-                samplenumber,
-                COALESCE(NULLIF(name, ''), NULLIF(measured_by, '')) AS operator,
-                date AS measurement_date,
-                COALESCE(NULLIF(method, ''), NULLIF(data_type, '')) AS method,
-                notes,
-                data
-            FROM public.ft_icr_ms_entries
-            {where}
-        ) src
-        GROUP BY samplenumber, operator, measurement_date, method, notes
+            CASE
+                WHEN (data->>'peak_count') ~ '^[0-9]+$'
+                THEN (data->>'peak_count')::int
+                ELSE 0
+            END AS peak_count,
+            CASE
+                WHEN (data->>'min_signal_to_noise') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                THEN (data->>'min_signal_to_noise')::double precision
+                ELSE NULL
+            END AS min_signal_to_noise
+        FROM public.ft_icr_ms_entries
+        {where}
         ORDER BY samplenumber, method, notes
-        LIMIT {lim}
+        LIMIT %s
     """
-    _, rows = run_query_with_rls(sql_text, request)
+    params.append(lim)
+    _, rows = run_query_with_rls(sql_text, request, params)
 
     idx = _ft_file_index(str(_ft_root()))
     root = Path(idx["root"])
@@ -250,38 +253,46 @@ def lab_method_entries(
         return lab_ft_icr_ms_measurements(request=request, samplenumber=samplenumber, limit=lim)
 
     where = ""
+    params: list = []
     if samplenumber:
         if not re.match(r"^[A-Za-z0-9_.:-]+$", samplenumber):
             raise HTTPException(400, "Invalid samplenumber format")
-        safe_sample = samplenumber.replace("'", "''")
-        where = f" WHERE samplenumber = '{safe_sample}'"
+        where = " WHERE samplenumber = %s"
+        params.append(samplenumber)
 
     sql_text = (
         "SELECT samplenumber, name, measured_by, type, date, fraction, instrument, data_type, data "
         f"FROM public.{table}_entries"
         f"{where} "
         "ORDER BY samplenumber "
-        f"LIMIT {lim}"
+        "LIMIT %s"
     )
-    cols, rows = run_query_with_rls(sql_text, request)
+    params.append(lim)
+    cols, rows = run_query_with_rls(sql_text, request, params)
     return {"method": table, "label": method_label(table), "columns": cols, "rows": rows}
 
 
 @router.get("/api/lab/ft-icr-ms")
-def lab_ft_icr_ms_entries(request: Request, samplenumber: str | None = None, limit: int = 200):
-    return lab_ft_icr_ms_measurements(request=request, samplenumber=samplenumber, limit=limit)
+def lab_ft_icr_ms_entries(request: Request, samplenumber: str | None = None, method: str | None = None, limit: int = 200):
+    return lab_ft_icr_ms_measurements(request=request, samplenumber=samplenumber, method=method, limit=limit)
 
 
 @router.get("/api/lab/ft-icr-ms/measurements")
 def lab_ft_icr_ms_measurements(
     request: Request,
     samplenumber: str | None = None,
+    method: str | None = None,
     limit: int = 5000,
 ):
-    rows = _ft_measurement_rows(request, limit=limit, samplenumber=samplenumber)
+    rows = _ft_measurement_rows(request, limit=limit, samplenumber=samplenumber, method=method)
+    label = "FT-ICR-MS"
+    if method:
+        canon = _canonical_ft_mode(method)
+        if canon:
+            label = f"FT-ICR-MS {canon}"
     return {
         "method": "ft_icr_ms",
-        "label": "FT-ICR-MS",
+        "label": label,
         "columns": [
             "samplenumber",
             "operator",
@@ -302,9 +313,10 @@ def lab_ft_icr_ms_measurements(
 def lab_ft_icr_ms_measurements_alias(
     request: Request,
     samplenumber: str | None = None,
+    method: str | None = None,
     limit: int = 5000,
 ):
-    return lab_ft_icr_ms_measurements(request=request, samplenumber=samplenumber, limit=limit)
+    return lab_ft_icr_ms_measurements(request=request, samplenumber=samplenumber, method=method, limit=limit)
 
 
 @router.get("/api/lab/ft-icr-ms/download")
@@ -382,7 +394,7 @@ def matrix_wide(table: str, request: Request):
             if k not in drow or drow[k] in (None, ""):
                 drow[k] = v
             keys.add(k)
-    ordered_keys = sorted(keys)
+    ordered_keys = csv_column_order(table, keys)
     out_rows = []
     for sn, kv in samples.items():
         row = {"samplenumber": sn}
@@ -572,8 +584,13 @@ def matrix_iso_hd_alias():
 
 
 @router.get("/web/labdata/ft-icr-ms", response_class=HTMLResponse)
-def web_ft_icr_ms_measurements(request: Request):
-    rows = _ft_measurement_rows(request, limit=20000)
+def web_ft_icr_ms_measurements(request: Request, method: str | None = None):
+    rows = _ft_measurement_rows(request, limit=20000, method=method)
+    page_title = "FT-ICR-MS Measurement Summary"
+    if method:
+        canon = _canonical_ft_mode(method)
+        if canon:
+            page_title = f"FT-ICR-MS {canon} Measurement Summary"
 
     body_rows: list[str] = []
     for r in rows:
@@ -608,7 +625,7 @@ def web_ft_icr_ms_measurements(request: Request):
 <html lang=\"en\">
 <head>
     <meta charset=\"utf-8\" />
-    <title>OrgChem - FT-ICR-MS Measurements</title>
+    <title>OrgChem - {escape(page_title)}</title>
     <style>
         body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 1.5rem 2rem; background: #f5f6fa; }}
         .card {{ background: #fff; border-radius: 8px; padding: 1rem 1.25rem; box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06); }}
@@ -623,11 +640,17 @@ def web_ft_icr_ms_measurements(request: Request):
 </head>
 <body>
     <div class=\"card\">
-        <h1>FT-ICR-MS Measurement Summary</h1>
+        <h1>{escape(page_title)}</h1>
         <div class=\"links\">
             <a href=\"/web/labdata\">Lab data page</a>
             &nbsp;|&nbsp;
-            <a href=\"/api/lab/ft-icr-ms/measurements\" target=\"_blank\" rel=\"noopener\">Summary API</a>
+            <a href="/web/labdata/ft-icr-ms">All FT-ICR-MS</a>
+            &nbsp;|&nbsp;
+            <a href="/web/labdata/ft-icr-ms?method=APPIpos">APPIpos</a>
+            &nbsp;|&nbsp;
+            <a href="/web/labdata/ft-icr-ms?method=ESIneg">ESIneg</a>
+            &nbsp;|&nbsp;
+            <a href="/web/labdata/ft-icr-ms?method=ESIpos">ESIpos</a>
         </div>
         <table>
             <thead>
@@ -705,7 +728,7 @@ def matrix_method_html(table: str, request: Request):
         meta = {mf: r.get(mf) for mf in MATRIX_META_FIELDS}
         parsed_rows.append({"samplenumber": sn, "meta": meta, "data": d})
 
-    ordered_keys = sorted(keys)
+    ordered_keys = csv_column_order(table, keys)
     rows_count = len(parsed_rows)
     columns_count = 1 + len(MATRIX_META_FIELDS) + len(ordered_keys)
 
@@ -716,11 +739,20 @@ def matrix_method_html(table: str, request: Request):
     # Metadata columns
     for mf in MATRIX_META_FIELDS:
         header_cells.append(f'<th class="meta-header">{escape(MATRIX_META_LABELS.get(mf, mf))}</th>')
-    # Parameter columns
+    # Parameter columns – link to compound info page when a match exists
+    _cidx = _compound_index()
     for k in ordered_keys:
-        label = escape(str(k))
+        display = column_display_name(table, str(k))
+        label_text = escape(display)
+        raw_key = escape(str(k))
+        # Show raw DB key on hover when display name differs
+        title_attr = f' title="{raw_key}"' if display != str(k) else ""
+        norm = str(k).strip().lower().replace(" ", "").replace("-", "")
+        if norm in _cidx:
+            href = f'/web/compounds/{escape(str(k), quote=True)}'
+            label_text = f'<a href="{href}">{label_text}</a>'
         header_cells.append(
-            f'<th class="param-header">{label}</th>'
+            f'<th class="param-header"{title_attr}>{label_text}</th>'
         )
     header_html = "".join(header_cells)
 
@@ -805,7 +837,8 @@ def matrix_method_html(table: str, request: Request):
             background: #ffffff;
         }}
         table {{
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
             table-layout: fixed;
             width: max-content;
             min-width: 100%;
@@ -814,7 +847,7 @@ def matrix_method_html(table: str, request: Request):
         thead {{
             position: sticky;
             top: 0;
-            z-index: 1;
+            z-index: 3;
         }}
         th, td {{
             border: 1px solid #e5e7eb;
@@ -841,6 +874,22 @@ def matrix_method_html(table: str, request: Request):
             max-width: 7ch;
             text-align: left;
             white-space: nowrap;
+            position: sticky;
+            left: 0;
+            z-index: 1;
+            background: #f1f5f9;
+        }}
+        tbody .sample-cell {{
+            background: #ffffff;
+        }}
+        tbody tr:nth-child(even) .sample-cell {{
+            background: #f9fafb;
+        }}
+        tbody tr:hover .sample-cell {{
+            background: #e5f3ff;
+        }}
+        thead .sample-col {{
+            z-index: 4;
         }}
         .meta-header {{
             min-width: 8ch;
@@ -860,6 +909,13 @@ def matrix_method_html(table: str, request: Request):
             width: 32px;
             min-width: 32px;
             max-width: 32px;
+        }}
+        .param-header a {{
+            color: #2563eb;
+            text-decoration: none;
+        }}
+        .param-header a:hover {{
+            text-decoration: underline;
         }}
         .value-cell {{
             text-align: right;
